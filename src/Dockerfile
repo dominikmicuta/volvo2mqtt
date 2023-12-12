@@ -10,6 +10,10 @@ WORKDIR /volvoAAOS2mqtt
 # download requirements.txt
 RUN wget --no-cache https://raw.githubusercontent.com/Dielee/volvo2mqtt/main/requirements.txt
 
+# Add a virtual environment
+RUN python -m venv /venv
+ENV PATH="/venv/bin:$PATH"
+
 # install dependencies
 RUN pip install -r requirements.txt
 
