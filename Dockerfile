@@ -7,6 +7,10 @@ WORKDIR /volvoAAOS2mqtt
 # copy the dependencies file to the working directory
 COPY requirements.txt .
 
+# Add a virtual environment
+RUN python -m venv /venv
+ENV PATH="/venv/bin:$PATH"
+
 # install dependencies
 RUN pip install -r requirements.txt
 
