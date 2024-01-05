@@ -1,3 +1,18 @@
+## v1.8.23
+### 🚀 Features:
+
+- Add new charging system states #152
+
+## v1.8.22
+### 🚀 Features:
+
+- Change units to HA default #148
+
+## v1.8.21
+### 🐛 Bug Fixes:
+
+- Try to fix addon build #146
+
 ## v1.8.20
 ### 🐛 Bug Fixes:
 
