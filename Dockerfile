@@ -12,6 +12,8 @@ RUN python -m venv /venv
 ENV PATH="/venv/bin:$PATH"
 
 # install dependencies
+RUN pip install --upgrade setuptools
+RUN pip install --upgrade distribute 
 RUN pip install -r requirements.txt
 
 # copy the content of the local src directory to the working directory
