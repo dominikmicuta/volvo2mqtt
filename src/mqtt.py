@@ -5,12 +5,13 @@ import json
 import volvo
 import util
 import os
+import requests
 from threading import Thread, Timer
 from datetime import datetime
 from babel.dates import format_datetime
 from config import settings
 from const import CLIMATE_START_URL, CLIMATE_STOP_URL, CAR_LOCK_URL, \
-    CAR_UNLOCK_URL, availability_topic, icon_states, old_entity_ids
+    CAR_UNLOCK_URL, availability_topic, icon_states, old_entity_ids, otp_mqtt_topic
 
 mqtt_client: mqtt.Client
 subscribed_topics = []
@@ -20,7 +21,7 @@ climate_timer = {}
 engine_status = {}
 devices = {}
 active_schedules = {}
-
+otp_code = None
 
 def connect():
     client = mqtt.Client("volvoAAOS2mqtt") if os.environ.get("IS_HA_ADDON") \
@@ -37,6 +38,7 @@ def connect():
                 port = settings["mqtt"]["port"]
     client.connect(settings["mqtt"]["broker"], port)
     client.loop_start()
+    client.subscribe("volvoAAOS2mqtt/otp_code")
     client.on_message = on_message
     client.on_disconnect = on_disconnect
     client.on_connect = on_connect
@@ -45,17 +47,52 @@ def connect():
     mqtt_client = client
 
 
+def create_otp_input():
+    state_topic = otp_mqtt_topic + "/state"
+    config = {
+        "name": "Volvo OTP",
+        "object_id": f"volvo_otp",
+        "schema": "state",
+        "command_topic": otp_mqtt_topic,
+        "state_topic": state_topic,
+        "unique_id": "volvoAAOS2mqtt_otp",
+        "pattern": r"\d{6}",
+        "icon": "mdi:two-factor-authentication",
+        "mode": "text"
+    }
+
+    mqtt_client.publish(
+        "homeassistant/text/volvoAAOS2mqtt/volvo_otp/config",
+        json.dumps(config),
+        retain=True
+    )
+
+    mqtt_client.publish(
+        state_topic,
+        "000000",
+        retain=True
+    )
+
+def set_otp_state():
+    mqtt_client.publish(
+        otp_mqtt_topic + "/state",
+        otp_code,
+        retain=True
+    )
+
+
 def send_car_images(vin, data, device):
     if util.keys_exists(data, "images"):
         for entity in [{"name": "Exterior Image", "id": "exterior_image"},
                        {"name": "Interior Image", "id": "interior_image"}]:
-            url_topic = f"homeassistant/image/{vin}_{entity['id']}/image_url"
+            image_topic = f"homeassistant/image/{vin}_{entity['id']}/image_topic"
             config = {
                 "name": entity["name"],
                 "object_id": f"volvo_{vin}_{entity['id']}",
                 "schema": "state",
                 "icon": "mdi:image-area",
-                "url_topic": url_topic,
+                "content_type": "image/png",
+                "image_topic": image_topic,
                 "device": device,
                 "unique_id": f"volvoAAOS2mqtt_{vin}_{entity['id']}",
                 "availability_topic": availability_topic
@@ -67,19 +104,41 @@ def send_car_images(vin, data, device):
                 retain=True
             )
 
+            headers = {"User-Agent": "(Windows NT 10.0; Win64; x64)",
+                       "sec-ch-ua-platform": "\"Windows\"", "sec-fetch-dest": "document", "Accept-Encoding": "gzip, deflate, br, zstd",
+                       "sec-fetch-mode": "navigate", "sec-fetch-site": "none", "sec-fetch-user": "?1", "upgrade-insecure-requests": "1"}
+
+            # Post exterior image
             if entity["id"] == "exterior_image":
-                mqtt_client.publish(
-                    url_topic,
-                    data["images"]["exteriorImageUrl"],
-                    retain=True
-                )
+                if not os.path.exists("exterior_image.png"):
+                    response = requests.get(data["images"]["exteriorImageUrl"], headers=headers)
+                    if response.status_code == 200:
+                        with open("exterior_image.png", 'wb') as image:
+                            image.write(response.content)
+
+                if os.path.exists("exterior_image.png"):
+                    ext_image = open("exterior_image.png", mode="rb").read()
+                    mqtt_client.publish(
+                        image_topic,
+                        ext_image,
+                        retain=True
+                    )
 
             if entity["id"] == "interior_image":
-                mqtt_client.publish(
-                    url_topic,
-                    data["images"]["internalImageUrl"],
-                    retain=True
-                )
+                # Post interior Image
+                if not os.path.exists("interior_image.png"):
+                    response = requests.get(data["images"]["internalImageUrl"], headers=headers)
+                    if response.status_code == 200:
+                        with open("interior_image.png", 'wb') as image:
+                            image.write(response.content)
+
+                if os.path.exists("interior_image.png"):
+                    int_image = open("interior_image.png", mode="rb").read()
+                    mqtt_client.publish(
+                        image_topic,
+                        int_image,
+                        retain=True
+                    )
 
 
 def on_connect(client, userdata, flags, rc):
@@ -94,13 +153,22 @@ def on_disconnect(client, userdata, rc):
 
 
 def on_message(client, userdata, msg):
-    try:
-        vin = msg.topic.split('/')[2].split('_')[0]
-    except IndexError:
-        logging.error("Error - Cannot get vin from MQTT topic!")
-        return None
-
     payload = msg.payload.decode("UTF-8")
+    if msg.topic == otp_mqtt_topic:
+        if msg.retain == 0:
+            global otp_code
+            otp_code = payload
+            set_otp_state()
+        else:
+            logging.warning("Found retained OTP, this can't work! Please clean retained messages!")
+        return None
+    else:
+        try:
+            vin = msg.topic.split('/')[2].split('_')[0]
+        except IndexError:
+            logging.error("Error - Cannot get vin from MQTT topic!")
+            return None
+
     if "climate_status" in msg.topic:
         if payload == "ON":
             start_climate(vin)
@@ -114,6 +182,13 @@ def on_message(client, userdata, msg):
     elif "update_data" in msg.topic:
         if payload == "PRESS":
             update_car_data(True)
+    elif "update_interval" in msg.topic:
+        update_interval = int(payload)
+        if update_interval >= 60 or update_interval == -1:
+            settings.update({"updateInterval": int(update_interval)})
+        else:
+            logging.warning("Interval " + str(update_interval) + " seconds is to low. Doing nothing!")
+        update_car_data()
     elif "schedule" in msg.topic:
         try:
             d = json.loads(payload)
@@ -214,11 +289,15 @@ def start_climate(vin):
 def update_loop():
     create_ha_devices()
     while True:
-        logging.info("Sending mqtt update...")
-        send_heartbeat()
-        update_car_data()
-        logging.info("Mqtt update done. Next run in " + str(settings["updateInterval"]) + " seconds.")
-        time.sleep(settings["updateInterval"])
+        if settings["updateInterval"] > 0:
+            logging.info("Sending mqtt update...")
+            send_heartbeat()
+            update_car_data()
+            logging.info("Mqtt update done. Next run in " + str(settings["updateInterval"]) + " seconds.")
+            time.sleep(settings["updateInterval"])
+        else:
+            logging.info("Data update is disabled, doing nothing for 30 seconds")
+            time.sleep(30)
 
 
 def update_car_data(force_update=False, overwrite={}):
@@ -226,7 +305,7 @@ def update_car_data(force_update=False, overwrite={}):
     last_data_update = format_datetime(datetime.now(util.TZ), format="medium", locale=settings["babelLocale"])
     for vin in volvo.vins:
         for entity in volvo.supported_endpoints[vin]:
-            if entity["domain"] == "button":
+            if entity["domain"] in ["button"]:
                 continue
 
             ov_entity_id = ""
@@ -243,6 +322,8 @@ def update_car_data(force_update=False, overwrite={}):
                 state = last_data_update
             elif entity["id"] == "active_schedules":
                 state = active_schedules[vin]
+            elif entity["id"] == "update_interval":
+                state = settings["updateInterval"]
             elif entity["id"] == "api_backend_status":
                 if force_update:
                     state = volvo.get_backend_status()
@@ -256,13 +337,26 @@ def update_car_data(force_update=False, overwrite={}):
 
             if entity["domain"] == "device_tracker" or entity["id"] == "active_schedules":
                 topic = f"homeassistant/{entity['domain']}/{vin}_{entity['id']}/attributes"
+            elif entity["id"] == "warnings":
+                mqtt_client.publish(
+                    f"homeassistant/{entity['domain']}/{vin}_{entity['id']}/attributes",
+                    json.dumps(state),
+                    retain=True
+                )
+                if state:
+                    state = sum(value == "FAILURE" for value in state.values())
+                else:
+                    state = 0
+
+                topic = f"homeassistant/{entity['domain']}/{vin}_{entity['id']}/state"
             else:
                 topic = f"homeassistant/{entity['domain']}/{vin}_{entity['id']}/state"
 
             if state or state == 0:
                 mqtt_client.publish(
                     topic,
-                    json.dumps(state) if isinstance(state, dict) or isinstance(state, list) else state
+                    json.dumps(state) if isinstance(state, dict) or isinstance(state, list) else state,
+                    retain=True
                 )
                 update_ha_device(entity, vin, state)
 
@@ -336,6 +430,7 @@ def create_ha_devices():
                 "unique_id": f"volvoAAOS2mqtt_{vin}_{entity['id']}",
                 "availability_topic": availability_topic
             }
+
             if entity.get("device_class"):
                 config["device_class"] = entity["device_class"]
 
@@ -345,13 +440,20 @@ def create_ha_devices():
             if entity.get("state_class"):
                 config["state_class"] = entity["state_class"]
 
-            if entity.get("domain") == "device_tracker" or entity.get("id") == "active_schedules":
+            if (entity.get("domain") == "device_tracker" or entity.get("id") == "active_schedules"
+                    or entity.get("id") == "warnings"):
                 config["json_attributes_topic"] = f"homeassistant/{entity['domain']}/{vin}_{entity['id']}/attributes"
-            elif entity.get("domain") in ["switch", "lock", "button"]:
+
+            if entity.get("domain") in ["switch", "lock", "button", "number"]:
                 command_topic = f"homeassistant/{entity['domain']}/{vin}_{entity['id']}/command"
                 config["command_topic"] = command_topic
                 subscribed_topics.append(command_topic)
                 mqtt_client.subscribe(command_topic)
+
+                if entity["domain"] == "number":
+                    config["min"] = entity["min"]
+                    config["max"] = entity["max"]
+                    config["mode"] = entity["mode"]
             elif entity.get("domain") == "image":
                 config["url_topic"] = f"homeassistant/{entity['domain']}/{vin}_{entity['id']}/image_url"
 
@@ -365,11 +467,11 @@ def create_ha_devices():
 
 
 def send_heartbeat():
-    mqtt_client.publish(availability_topic, "online")
+    mqtt_client.publish(availability_topic, "online", retain=True)
 
 
 def send_offline():
-    mqtt_client.publish(availability_topic, "offline")
+    mqtt_client.publish(availability_topic, "offline", retain=True)
 
 
 def delete_old_entities():

@@ -4,6 +4,8 @@ import os
 import re
 import sys
 import config
+import json
+from google_play_scraper import app
 from logging import handlers
 from datetime import datetime
 from const import units
@@ -28,11 +30,34 @@ class SensitiveDataFilter(logging.Filter):
             record.msg = re.sub(pattern, "<REDACTED>", record.msg)
         return True
 
+def get_volvo_app_version():
+    result = app(
+        'se.volvo.vcc',
+        lang='en',
+        country='us'
+    )
+
+    if "version" in result:
+        return result["version"]
+    else:
+        return "5.37.0"
+
+def get_token_path():
+    token_path = ".token"
+    if os.environ.get("IS_HA_ADDON"):
+        check_existing_folder("/addons/volvo2mqtt/token/")
+        token_path = "/addons/volvo2mqtt/token/.token"
+
+    return token_path
+
+def save_to_json(data, token_path):
+    with open(token_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
 def get_icon_between(icon_list, state):
     icon = None
     for s in icon_list:
-        if s["to"] <= state <= s["from"]:
+        if s["to"] <= state < s["from"]:
             icon = s["icon"]
     return icon
 
@@ -40,7 +65,7 @@ def get_icon_between(icon_list, state):
 def setup_logging():
     log_location = "volvo2mqtt.log"
     if os.environ.get("IS_HA_ADDON"):
-        check_existing_folder()
+        check_existing_folder("/addons/volvo2mqtt/log/")
         log_location = "/addons/volvo2mqtt/log/volvo2mqtt.log"
 
     logging.Formatter.converter = lambda *args: datetime.now(tz=TZ).timetuple()
@@ -73,8 +98,8 @@ def setup_logging():
             logger.setLevel(logging.ERROR)
 
 
-def check_existing_folder():
-    Path("/addons/volvo2mqtt/log/").mkdir(parents=True, exist_ok=True)
+def check_existing_folder(path):
+    Path(path).mkdir(parents=True, exist_ok=True)
 
 
 def keys_exists(element, *keys):

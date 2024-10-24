@@ -1,8 +1,9 @@
 from config import settings
 
-VERSION = "v1.8.23"
+VERSION = "v1.10.2"
 
-OAUTH_URL = "https://volvoid.eu.volvocars.com/as/token.oauth2"
+OAUTH_TOKEN_URL = "https://volvoid.eu.volvocars.com/as/token.oauth2"
+OAUTH_AUTH_URL = "https://volvoid.eu.volvocars.com/as/authorization.oauth2"
 VEHICLES_URL = "https://api.volvocars.com/connected-vehicle/v2/vehicles"
 VEHICLE_DETAILS_URL = "https://api.volvocars.com/connected-vehicle/v2/vehicles/{0}"
 WINDOWS_STATE_URL = "https://api.volvocars.com/connected-vehicle/v2/vehicles/{0}/windows"
@@ -20,7 +21,8 @@ FUEL_BATTERY_STATE_URL = "https://api.volvocars.com/connected-vehicle/v2/vehicle
 STATISTICS_URL = "https://api.volvocars.com/connected-vehicle/v2/vehicles/{0}/statistics"
 ENGINE_DIAGNOSTICS_URL = "https://api.volvocars.com/connected-vehicle/v2/vehicles/{0}/engine"
 VEHICLE_DIAGNOSTICS_URL = "https://api.volvocars.com/connected-vehicle/v2/vehicles/{0}/diagnostics"
-API_BACKEND_STATUS = "https://oip-dev-bff.euwest1.production.volvo.care/api/v1/backend-status"
+WARNINGS_URL = "https://api.volvocars.com/connected-vehicle/v2/vehicles/{0}/warnings"
+API_BACKEND_STATUS = "https://public-developer-portal-bff.weu-prod.ecpaz.volvocars.biz/api/v1/backend-status"
 
 LENGTH_KILOMETERS = "km"
 SPEED_KILOMETERS_PER_HOUR = "km/h"
@@ -73,23 +75,24 @@ icon_states = {
     "door_rear_right": {"ON": "car-door", "OFF": "car-door-lock"},
     "engine_state": {"ON": "engine-outline", "OFF": "engine-off-outline"},
     "battery_charge_level": [
-                    {"from": 100, "to": 100, "icon": "battery"},
-                    {"from": 99, "to": 90, "icon": "battery-90"},
-                    {"from": 89, "to": 80, "icon": "battery-80"},
-                    {"from": 79, "to": 70, "icon": "battery-70"},
-                    {"from": 69, "to": 60, "icon": "battery-60"},
-                    {"from": 59, "to": 50, "icon": "battery-50"},
-                    {"from": 49, "to": 40, "icon": "battery-40"},
-                    {"from": 39, "to": 30, "icon": "battery-30"},
-                    {"from": 29, "to": 20, "icon": "battery-20"},
-                    {"from": 19, "to": 10, "icon": "battery-10"},
-                    {"from": 9, "to": 0, "icon": "battery-alert-variant-outline"},
+                    {"from": float('inf'), "to": 100, "icon": "battery"},
+                    {"from": 100, "to": 90, "icon": "battery-90"},
+                    {"from": 90, "to": 80, "icon": "battery-80"},
+                    {"from": 80, "to": 70, "icon": "battery-70"},
+                    {"from": 70, "to": 60, "icon": "battery-60"},
+                    {"from": 60, "to": 50, "icon": "battery-50"},
+                    {"from": 50, "to": 40, "icon": "battery-40"},
+                    {"from": 40, "to": 30, "icon": "battery-30"},
+                    {"from": 30, "to": 20, "icon": "battery-20"},
+                    {"from": 20, "to": 10, "icon": "battery-10"},
+                    {"from": 10, "to": 0, "icon": "battery-alert-variant-outline"},
     ]
 }
 
 supported_entities = [
                         {"name": "Battery Charge Level", "domain": "sensor", "device_class": "battery", "id": "battery_charge_level", "unit": "%", "icon": "car-battery", "url": RECHARGE_STATE_URL, "state_class": "measurement"},
                         {"name": "Battery Charge Level", "domain": "sensor", "device_class": "battery", "id": "battery_charge_level", "unit": "%", "icon": "car-battery", "url": FUEL_BATTERY_STATE_URL, "state_class": "measurement"},
+                        {"name": "Battery Capacity", "domain": "sensor", "device_class": "energy_storage", "id": "battery_capacity", "unit": ENERGY_KILO_WATT_HOUR, "icon": "car-battery", "url": VEHICLE_DETAILS_URL, "state_class": "measurement"},
                         {"name": "Electric Range", "domain": "sensor", "id": "electric_range", "unit": LENGTH_KILOMETERS if not units.get(settings["babelLocale"]) else units[settings["babelLocale"]]["electric_range"]["unit"], "icon": "map-marker-distance", "url": RECHARGE_STATE_URL, "state_class": "measurement"},
                         {"name": "Estimated Charging Time", "domain": "sensor", "id": "estimated_charging_time", "unit": TIME_MINUTES, "icon": "timer-sync-outline", "url": RECHARGE_STATE_URL, "state_class": "measurement"},
                         {"name": "Charging System Status", "domain": "sensor", "id": "charging_system_status", "icon": "ev-station", "url": RECHARGE_STATE_URL},
@@ -130,7 +133,11 @@ supported_entities = [
                         {"name": "Time to Service", "domain": "sensor", "id": "time_to_service", "icon": "wrench-clock", "url": VEHICLE_DIAGNOSTICS_URL},
                         {"name": "Service warning status", "domain": "sensor", "id": "service_warning_status", "icon": "alert-outline", "url": VEHICLE_DIAGNOSTICS_URL},
                         {"name": "Washer Fluid Level warning", "domain": "sensor", "id": "washer_fluid_warning", "icon": "alert-outline", "url": VEHICLE_DIAGNOSTICS_URL},
-                        {"name": "API Backend status", "domain": "sensor", "id": "api_backend_status", "icon": "alert"}
+                        {"name": "API Backend status", "domain": "sensor", "id": "api_backend_status", "icon": "alert"},
+                        {"name": "Update Interval", "domain": "number", "id": "update_interval", "unit": "seconds", "icon": "timer", "min": -1, "max": 600, "mode": "box"},
+                        {"name": "Warnings", "domain": "sensor", "id": "warnings", "icon": "alert", "url": WARNINGS_URL}
 ]
 
 old_entity_ids = ["months_to_service", "service_warning_trigger", "distance_to_empty"]
+otp_max_loops = 24
+otp_mqtt_topic = "volvoAAOS2mqtt/otp_code"

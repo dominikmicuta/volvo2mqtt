@@ -1,18 +1,21 @@
+import json
 import logging
 import requests
 import mqtt
 import util
 import time
 import re
+import os.path
 from threading import current_thread, Thread
 from datetime import datetime, timedelta
 from config import settings
 from babel.dates import format_datetime
 from json import JSONDecodeError
 from const import charging_system_states, charging_connection_states, door_states, window_states, \
-    OAUTH_URL, VEHICLES_URL, VEHICLE_DETAILS_URL, RECHARGE_STATE_URL, CLIMATE_START_URL, \
+    OAUTH_AUTH_URL, OAUTH_TOKEN_URL, VEHICLES_URL, VEHICLE_DETAILS_URL, RECHARGE_STATE_URL, CLIMATE_START_URL, \
     WINDOWS_STATE_URL, LOCK_STATE_URL, TYRE_STATE_URL, supported_entities, FUEL_BATTERY_STATE_URL, \
-    STATISTICS_URL, ENGINE_DIAGNOSTICS_URL, API_BACKEND_STATUS, engine_states
+    STATISTICS_URL, ENGINE_DIAGNOSTICS_URL, VEHICLE_DIAGNOSTICS_URL, API_BACKEND_STATUS, WARNINGS_URL, engine_states, \
+    otp_max_loops
 
 session = requests.Session()
 session.headers = {
@@ -30,35 +33,139 @@ vcc_api_keys = []
 backend_status = ""
 
 
-def authorize():
-    headers = {
-        "authorization": "Basic aDRZZjBiOlU4WWtTYlZsNnh3c2c1WVFxWmZyZ1ZtSWFEcGhPc3kxUENhVXNpY1F0bzNUUjVrd2FKc2U0QVpkZ2ZJZmNMeXc=",
-        "content-type": "application/x-www-form-urlencoded",
-        "accept": "application/json"
-    }
+def authorize(renew_tokenfile=False):
+    global refresh_token
 
-    body = {
-        "username": settings.volvoData["username"],
-        "password": settings.volvoData["password"],
-        "grant_type": "password",
-        "scope": "openid email profile care_by_volvo:financial_information:invoice:read care_by_volvo:financial_information:payment_method care_by_volvo:subscription:read customer:attributes customer:attributes:write order:attributes vehicle:attributes tsp_customer_api:all conve:brake_status conve:climatization_start_stop conve:command_accessibility conve:commands conve:diagnostics_engine_status conve:diagnostics_workshop conve:doors_status conve:engine_status conve:environment conve:fuel_status conve:honk_flash conve:lock conve:lock_status conve:navigation conve:odometer_status conve:trip_statistics conve:tyre_status conve:unlock conve:vehicle_relation conve:warnings conve:windows_status energy:battery_charge_level energy:charging_connection_status energy:charging_system_status energy:electric_range energy:estimated_charging_time energy:recharge_status vehicle:attributes"
-    }
-    auth = requests.post(OAUTH_URL, data=body, headers=headers)
+    token_path = util.get_token_path()
+    if os.path.isfile(token_path) and not renew_tokenfile:
+        logging.info("Using login from token file")
+        f = open(token_path)
+        try:
+            data = json.load(f)
+            refresh_token = data["refresh_token"]
+            refresh_auth()
+        except ValueError:
+            logging.warning("Detected corrupted token file, restarting auth process")
+            authorize(True)
+    else:
+        logging.info("Starting login with OTP")
+        auth_session = requests.session()
+        auth_session.headers = {
+            "authorization": "Basic aDRZZjBiOlU4WWtTYlZsNnh3c2c1WVFxWmZyZ1ZtSWFEcGhPc3kxUENhVXNpY1F0bzNUUjVrd2FKc2U0QVpkZ2ZJZmNMeXc=",
+            "User-Agent": "vca-android/" + util.get_volvo_app_version(),
+            "Accept-Encoding": "gzip",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+
+        url_params = ("?client_id=h4Yf0b"
+                      "&response_type=code"
+                      "&acr_values=urn:volvoid:aal:bronze:2sv"
+                      "&response_mode=pi.flow"
+                      "&scope=openid email profile care_by_volvo:financial_information:invoice:read care_by_volvo:financial_information:payment_method care_by_volvo:subscription:read customer:attributes customer:attributes:write order:attributes vehicle:attributes tsp_customer_api:all conve:brake_status conve:climatization_start_stop conve:command_accessibility conve:commands conve:diagnostics_engine_status conve:diagnostics_workshop conve:doors_status conve:engine_status conve:environment conve:fuel_status conve:honk_flash conve:lock conve:lock_status conve:navigation conve:odometer_status conve:trip_statistics conve:tyre_status conve:unlock conve:vehicle_relation conve:warnings conve:windows_status energy:battery_charge_level energy:charging_connection_status energy:charging_system_status energy:electric_range energy:estimated_charging_time energy:recharge_status vehicle:attributes")
+
+        auth = auth_session.get(OAUTH_AUTH_URL + url_params)
+        if auth.status_code == 200:
+            response = auth.json()
+            auth_state = response["status"]
+
+            if auth_state == "USERNAME_PASSWORD_REQUIRED":
+                auth_session.headers.update({"x-xsrf-header": "PingFederate"})
+                response = check_username_password(auth_session, response)
+                auth_state = response["status"]
+
+                if auth_state == "OTP_REQUIRED":
+                    response = send_otp(auth_session, response)
+                    response = continue_auth(auth_session, response)
+                    token_data = get_token(auth_session, response)
+                else:
+                    raise Exception("Unkown auth state " + auth_state)
+            elif auth_state == "OTP_REQUIRED":
+                response = send_otp(auth_session, response)
+                response = continue_auth(auth_session, response)
+                token_data = get_token(auth_session, response)
+            elif auth_state == "OTP_VERIFIED":
+                response = continue_auth(auth_session, response)
+                token_data = get_token(auth_session, response)
+            elif auth_state == "COMPLETED":
+                token_data = get_token(auth_session, response)
+            else:
+                raise Exception("Unkown auth state " + auth_state)
+
+            session.headers.update({"authorization": "Bearer " + token_data["access_token"]})
+
+            global token_expires_at
+            token_expires_at = datetime.now(util.TZ) + timedelta(seconds=(token_data["expires_in"] - 30))
+            refresh_token = token_data["refresh_token"]
+
+            util.save_to_json(token_data, token_path)
+        else:
+            message = auth.json()
+            raise Exception(message["details"][0]["userMessage"])
+
+    get_vcc_api_keys()
+    get_vehicles()
+    check_supported_endpoints()
+    Thread(target=backend_status_loop).start()
+
+def continue_auth(auth_session, data):
+    next_url = data["_links"]["continueAuthentication"]["href"] + "?action=continueAuthentication"
+    auth = auth_session.get(next_url)
+
     if auth.status_code == 200:
-        data = auth.json()
-        session.headers.update({"authorization": "Bearer " + data["access_token"]})
-
-        global token_expires_at, refresh_token
-        token_expires_at = datetime.now(util.TZ) + timedelta(seconds=(data["expires_in"] - 30))
-        refresh_token = data["refresh_token"]
-
-        get_vcc_api_keys()
-        get_vehicles()
-        check_supported_endpoints()
-        Thread(target=backend_status_loop).start()
+        return auth.json()
     else:
         message = auth.json()
+        raise Exception(message["details"][0]["userMessage"])
+
+
+def get_token(auth_session, data):
+    auth_session.headers.update({"content-type": "application/x-www-form-urlencoded"})
+    body = {"code": data["authorizeResponse"]["code"], "grant_type": "authorization_code"}
+    token_auth = auth_session.post(OAUTH_TOKEN_URL, data=body)
+
+    if token_auth.status_code == 200:
+        return token_auth.json()
+    else:
+        message = token_auth.json()
         raise Exception(message["error_description"])
+
+
+def check_username_password(auth_session, data):
+    next_url = data["_links"]["checkUsernamePassword"]["href"] + "?action=checkUsernamePassword"
+    body = {"username": settings.volvoData["username"],
+             "password": settings.volvoData["password"]}
+    auth = auth_session.post(next_url, data=json.dumps(body))
+
+    if auth.status_code == 200:
+        return auth.json()
+    else:
+        message = auth.json()
+        raise Exception(message["details"][0]["userMessage"])
+
+
+def send_otp(auth_session, data):
+    mqtt.create_otp_input()
+    next_url = data["_links"]["checkOtp"]["href"] + "?action=checkOtp"
+    body = {"otp": ""}
+
+    for i in range(otp_max_loops):
+        if mqtt.otp_code:
+            body["otp"] = mqtt.otp_code
+            break
+
+        logging.info("Waiting for otp code... Please check your mailbox and post your otp code to the following "
+                     "mqtt topic \"volvoAAOS2mqtt/otp_code\". Retry " + str(i) + "/" + str(otp_max_loops))
+        time.sleep(5)
+
+    if not mqtt.otp_code:
+        raise Exception ("No OTP found, exting...")
+
+    auth = auth_session.post(next_url, data=json.dumps(body))
+    if auth.status_code == 200:
+        return auth.json()
+    else:
+        message = auth.json()
+        raise Exception(message["details"][0]["userMessage"])
 
 
 def refresh_auth():
@@ -76,18 +183,22 @@ def refresh_auth():
     }
 
     try:
-        auth = requests.post(OAUTH_URL, data=body, headers=headers)
+        auth = requests.post(OAUTH_TOKEN_URL, data=body, headers=headers)
     except requests.exceptions.RequestException as e:
         logging.error("Error refreshing credentials data: " + str(e))
         return None
 
     if auth.status_code == 200:
+        token_path = util.get_token_path()
         data = auth.json()
+        util.save_to_json(data, token_path)
         session.headers.update({"authorization": "Bearer " + data["access_token"]})
 
         global token_expires_at
         token_expires_at = datetime.now(util.TZ) + timedelta(seconds=(data["expires_in"] - 30))
         refresh_token = data["refresh_token"]
+    else:
+        authorize(renew_tokenfile=True)
 
 
 def get_vehicles():
@@ -200,9 +311,17 @@ def check_vcc_api_key(test_key, extended_until=None):
                 logging.warning("VCCAPIKEY " + test_key + " is extended and will be reusable at: "
                                 + format_datetime(extended_until, format="medium", locale=settings["babelLocale"]))
         else:
-            logging.warning("VCCAPIKEY " + test_key + " isn't working! " + data["error"]["message"])
+            if "error" in data:
+                logging.warning("VCCAPIKEY " + test_key + " isn't working! " + data["error"]["message"])
+            else:
+                logging.warning("VCCAPIKEY " + test_key + " isn't working! Statuscode " + str(response.status_code) +
+                                " Message: " + response.text)
     else:
-        logging.warning("VCCAPIKEY " + test_key + " isn't working! " + data["error"]["message"])
+        if "error" in data:
+            logging.warning("VCCAPIKEY " + test_key + " isn't working! " + data["error"]["message"])
+        else:
+            logging.warning("VCCAPIKEY " + test_key + " isn't working! Statuscode " + str(response.status_code) +
+                            " Message: " + response.text)
     return True, extended_until
 
 
@@ -346,7 +465,7 @@ def api_call(url, method, vin, sensor_id=None, force_update=False, key_change=Fa
         refresh_auth()
 
     if url in [RECHARGE_STATE_URL, WINDOWS_STATE_URL, LOCK_STATE_URL, TYRE_STATE_URL,
-               STATISTICS_URL, ENGINE_DIAGNOSTICS_URL, FUEL_BATTERY_STATE_URL]:
+               STATISTICS_URL, ENGINE_DIAGNOSTICS_URL, VEHICLE_DIAGNOSTICS_URL, FUEL_BATTERY_STATE_URL, WARNINGS_URL]:
         # Minimize API calls for endpoints with multiple values
         response = cached_request(url, method, vin, force_update, key_change)
         if response is None:
@@ -440,9 +559,10 @@ def cached_request(url, method, vin, force_update=False, key_change=False):
 def parse_api_data(data, sensor_id=None):
     if sensor_id != "api_backend_status":
         data = data["data"]
-
     if sensor_id == "battery_charge_level":
         return data["batteryChargeLevel"]["value"] if util.keys_exists(data, "batteryChargeLevel") else None
+    elif sensor_id == "battery_capacity":
+        return data["batteryCapacityKWH"] if util.keys_exists(data, "batteryCapacityKWH") else None
     elif sensor_id == "electric_range":
         return util.convert_metric_values(data["electricRange"]["value"]) \
             if util.keys_exists(data, "electricRange") else None
@@ -475,14 +595,7 @@ def parse_api_data(data, sensor_id=None):
     elif sensor_id == "lock_status":
         return data["centralLock"]["value"] if util.keys_exists(data, "centralLock") else None
     elif sensor_id == "odometer":
-        multiplier = 1
-        if util.keys_exists(settings["volvoData"], "odometerMultiplier"):
-            multiplier = settings["volvoData"]["odometerMultiplier"]
-            if isinstance(multiplier, str):
-                multiplier = 1
-            elif multiplier < 1:
-                multiplier = 1
-        return util.convert_metric_values(int(data["odometer"]["value"]) * multiplier) \
+        return util.convert_metric_values(int(data["odometer"]["value"])) \
             if util.keys_exists(data, "odometer") else None
     elif sensor_id == "window_front_left":
         return window_states[data["frontLeftWindow"]["value"]] if util.keys_exists(data, "frontLeftWindow") \
@@ -530,30 +643,25 @@ def parse_api_data(data, sensor_id=None):
                 return fuel_amount
         return None
     elif sensor_id == "average_fuel_consumption":
+        average_fuel_con = 0
         if util.keys_exists(data, "averageFuelConsumption"):
             average_fuel_con = float(data["averageFuelConsumption"]["value"])
-            if average_fuel_con > 0:
-                multiplier = 1
-                if util.keys_exists(settings["volvoData"], "averageFuelConsumptionMultiplier"):
-                    multiplier = settings["volvoData"]["averageFuelConsumptionMultiplier"]
-                    if isinstance(multiplier, str):
-                        multiplier = 1
-                    elif multiplier < 1:
-                        multiplier = 1
-                return average_fuel_con * multiplier
+        elif util.keys_exists(data, "averageFuelConsumptionAutomatic"):
+            average_fuel_con = float(data["averageFuelConsumptionAutomatic"]["value"])
+
+        if average_fuel_con > 0:
+            return average_fuel_con
         return None
     elif sensor_id == "average_speed":
+        average_speed = 0
         if util.keys_exists(data, "averageSpeed"):
             average_speed = float(data["averageSpeed"]["value"])
-            if average_speed > 1:
-                divider = 1
-                if util.keys_exists(settings["volvoData"], "averageSpeedDivider"):
-                    divider = settings["volvoData"]["averageSpeedDivider"]
-                    if isinstance(divider, str):
-                        divider = 1
-                    elif divider < 1:
-                        divider = 1
-                return util.convert_metric_values(average_speed / divider)
+        elif util.keys_exists(data, "averageSpeedAutomatic"):
+            average_speed = float(data["averageSpeedAutomatic"]["value"])
+
+        if average_speed != 0:
+            return util.convert_metric_values(average_speed)
+
         return None
     elif sensor_id == "location":
         coordinates = {}
@@ -592,8 +700,28 @@ def parse_api_data(data, sensor_id=None):
     elif sensor_id == "service_warning_status":
         return data["serviceWarning"]["value"] if util.keys_exists(data, "serviceWarning") else None
     elif sensor_id == "average_energy_consumption":
-        return data["averageEnergyConsumption"]["value"] if util.keys_exists(data, "averageEnergyConsumption") else None
+        average_energy_con = 0
+        if util.keys_exists(data, "averageEnergyConsumption"):
+            average_energy_con = data["averageEnergyConsumption"]["value"]
+        elif util.keys_exists(data, "averageEnergyConsumptionAutomatic"):
+            average_energy_con = data["averageEnergyConsumptionAutomatic"]["value"]
+
+        if average_energy_con != 0:
+            return average_energy_con
+        return None
     elif sensor_id == "washer_fluid_warning":
         return data["washerFluidLevelWarning"]["value"] if util.keys_exists(data, "washerFluidLevelWarning") else None
+    elif sensor_id == "warnings":
+        warnings = 0
+        cleaned_data = {}
+        for key, dicts in data.items():
+            contains_data = sum(value == "NO_WARNING" or value == "FAILURE" for value in dicts.values())
+            if contains_data:
+                warnings = warnings + 1
+                cleaned_data[key] = dicts["value"]
+
+        return cleaned_data if warnings > 0 else None
     else:
         return None
+
+

@@ -1,3 +1,105 @@
+## v1.10.2
+### 🐛 Bug Fixes:
+
+- Remove unused multiplier options #239
+
+## v1.10.1
+### 🚀 Features:
+
+- Optimize logging for vcc-api-key check #238
+
+## v1.10.0
+### 🚀 Features:
+
+- Remove unused multiplier options
+
+### 🐛 Bug Fixes:
+
+- Support new statistic keys #237
+
+## v1.9.7
+### 🐛 Bug Fixes:
+
+- Fix EX30 battery state #230
+
+## v1.9.6
+### 🐛 Bug Fixes:
+
+- Fixed interior and exterior Images #219
+- Take care of broken token files #220
+
+## v1.9.5
+### 🚀 Features:
+
+- Added "retain" states to survive HA reboot
+
+## v1.9.4
+### 🐛 Bug Fixes:
+
+- Fix backend state API url
+
+## v1.9.3
+### 🐛 Bug Fixes:
+
+- Ignore retained OTP messages #193
+
+## v1.9.2
+### 🐛 Bug Fixes:
+
+- Try to fix OTP Input
+- Fix `SyntaxWarning: invalid escape sequence '\d'` #196 
+
+## v1.9.1
+### 🚀 Features:
+
+- The token file now survives an HA addon update/restart
+
+### 🐛 Bug Fixes:
+
+- Extend OTP retry time to 120 seconds
+
+## v1.9.0
+### ⚠️ Breaking change 
+### 🚀 Features:
+
+- Add "Battery Capacity" sensor. Thanks to @gurtjun!
+- OTP Auth
+        This addon uses the same OTP authentication as the Volvo app, now. 
+        The following steps are required for authentication in exactly this order:
+        
+        1. Setup volvo2Mqtt, either via Docker, or via HA addon (take a look at the "Setup" section)
+        2. Fill in your settings and start volvo2Mqtt
+        3. Your log will show the following lines
+        Waiting for otp code... Please check your mailbox and post your otp code to the following mqtt topic "volvoAAOS2mqtt/otp_code". Retry 0/15
+        Waiting for otp code... Please check your mailbox and post your otp code to the following mqtt topic "volvoAAOS2mqtt/otp_code". Retry 1/15
+        etc ...
+        4. Now, open your mailbox and copy your OTP Code
+        5. Open HomeAssistant and search for the entity ID text.volvo_otp
+        6. Paste your OTP into the text entity and press Enter
+        7. If everything has worked, your addon is now authenticated. In the future, OTP authentication only needs to be done when updating, not when restarting the container.
+
+
+## v1.8.27
+### 🚀 Features:
+
+- Add state caching for "diagnostics" endpoint
+
+## v1.8.26
+### 🚀 Features:
+
+- Add option to disable updates #160 (Set the update interval to -1)
+
+## v1.8.25
+### 🚀 Features:
+
+- Fix INTERNAL_SERVER_ERROR #165
+
+## v1.8.24
+### 🚀 Features:
+
+- Add option for dynamic interval settings #160
+- Add warnings endpoint #151
+
 ## v1.8.23
 ### 🚀 Features:
 
